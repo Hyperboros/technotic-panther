@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Technotic Panther</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@800&family=Instrument+Sans:wght@400;500;600&display=swap">
+<style id="lockStyle">
+/* The lock screen: the page itself is encrypted; this only asks for the password and opens it. */
+:root { --wall: #0b0c10; --line: #2a2d36; --opal: #ece9e2; --dim: #a3a3ad; --purple: #a24bff; --bad: #ff7a90; }
+html, body { margin: 0; min-height: 100%; background: var(--wall); color: var(--opal); font: 400 16px/1.5 'Instrument Sans', system-ui, sans-serif; }
+#lock { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; box-sizing: border-box; }
+#lock form { width: min(360px, 100%); }
+#lock h1 { margin: 0 0 6px; font: 800 44px/0.95 'Big Shoulders Display', 'Arial Narrow', sans-serif; letter-spacing: .01em; text-transform: uppercase; }
+#lock h1 span { color: var(--purple); }
+#lock p { margin: 0 0 22px; color: var(--dim); font-size: 14px; }
+#lock label { display: block; font-size: 13px; color: var(--dim); margin-bottom: 6px; }
+#lock .row { display: flex; gap: 8px; }
+#lock input { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: #14161c; color: var(--opal); font: inherit; }
+#lock input:focus-visible, #lock button:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+#lock button { padding: 11px 16px; border: 0; border-radius: 6px; background: var(--purple); color: #fff; font: 600 15px 'Instrument Sans', system-ui, sans-serif; cursor: pointer; }
+#lock button:disabled { opacity: .6; cursor: wait; }
+#lock .msg { min-height: 1.5em; margin-top: 10px; font-size: 14px; color: var(--bad); }
+</style>
+</head>
+<body>
+<main id="lock">
+  <form id="lockForm" autocomplete="off">
+    <h1>Technotic <span>Panther</span></h1>
+    <p>Private preview. Enter the password to open it.</p>
+    <label for="pw">Password</label>
+    <div class="row"><input id="pw" type="password" required autocomplete="current-password"><button id="go" type="submit">Open</button></div>
+    <div class="msg" id="msg" role="alert" aria-live="polite"></div>
+  </form>
+</main>
+<script>
+(() => {
+  const SALT = '/DztctDhUZ5kHqw8qVJePg==', ITER = 600000, SEALED = {"page.html": "text/html", "manifest.json": "application/json", "assets/ring.wasm": "application/octet-stream", "assets/head_hi.wasm": "application/octet-stream", "assets/head_lo.wasm": "application/octet-stream", "stills/opal_off.jpg": "image/jpeg", "stills/opal_on.jpg": "image/jpeg"};     // SEALED maps each page path to its content type
+  const TYPES = SEALED, b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const form = document.getElementById('lockForm'), pw = document.getElementById('pw'), go = document.getElementById('go'), msg = document.getElementById('msg');
+  let key;
+
+  async function derive(p) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(p), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64(SALT), iterations: ITER, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  }
+  async function open(path) {
+    const r = await realFetch(path + '.enc', { cache: 'no-cache' });
+    if (!r.ok) throw new Error('missing ' + path);
+    const buf = new Uint8Array(await r.arrayBuffer());
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.subarray(0, 12) }, key, buf.subarray(12));
+  }
+  const realFetch = window.fetch.bind(window), dir = location.href.replace(/[?#].*$/, '').replace(/[^/]*$/, '');
+  function sealedPath(url) {
+    const u = new URL(url instanceof Request ? url.url : String(url), location.href).href.replace(/[?#].*$/, '');
+    const rel = u.startsWith(dir) ? u.slice(dir.length) : null;
+    return rel && rel in TYPES && rel !== 'page.html' ? rel : null;
+  }
+
+  async function unlock(p) {
+    key = await derive(p);
+    let page;
+    try { page = new TextDecoder().decode(await open('page.html')); }
+    catch (e) { key = null; throw new Error('wrong'); }
+    try { sessionStorage.setItem('panther-pw', p); } catch (e) {}
+    // the page's own requests for its manifest and meshes are answered from the sealed copies
+    window.fetch = async (url, init) => {
+      const rel = sealedPath(url);
+      return rel ? new Response(await open(rel), { headers: { 'Content-Type': TYPES[rel] } }) : realFetch(url, init);
+    };
+    for (const rel of Object.keys(TYPES).filter(r => r.startsWith('stills/'))) {
+      const url = URL.createObjectURL(new Blob([await open(rel)], { type: TYPES[rel] }));
+      page = page.split(rel).join(url);
+    }
+    show(page);
+  }
+
+  async function show(html) {
+    const t = document.createElement('template'); t.innerHTML = html;
+    document.getElementById('lock').remove(); document.getElementById('lockStyle').remove();
+    const scripts = [];
+    for (const n of [...t.content.childNodes]) {
+      if (n.nodeName === 'SCRIPT') scripts.push(n);
+      else if (['TITLE', 'META', 'LINK', 'STYLE'].includes(n.nodeName)) document.head.appendChild(n);
+      else document.body.appendChild(n);
+    }
+    for (const s of scripts) {     // in order, as the parser would: each CDN script loads before the page script runs
+      const e = document.createElement('script');
+      if (s.src) { e.src = s.src; await new Promise(ok => { e.onload = e.onerror = ok; document.body.appendChild(e); }); }
+      else { e.textContent = s.textContent; document.body.appendChild(e); }
+    }
+  }
+
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault(); go.disabled = true; msg.textContent = '';
+    try { await unlock(pw.value); }
+    catch (e) { go.disabled = false; msg.textContent = e.message === 'wrong' ? 'That password is not right.' : 'The page could not open. Reload and try again.'; pw.select(); }
+  });
+  let saved = null; try { saved = sessionStorage.getItem('panther-pw'); } catch (e) {}
+  if (saved) unlock(saved).catch(() => { try { sessionStorage.removeItem('panther-pw'); } catch (e) {} go.disabled = false; });
+  else pw.focus();
+})();
+</script>
+</body>
+</html>
